@@ -17,8 +17,8 @@
     <description>SonarQube training demo with intentionally seeded issues</description>
 
     <properties>
-        <java.version>26</java.version>
-        <maven.compiler.release>26</maven.compiler.release>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
     </properties>
 
     <dependencies>
