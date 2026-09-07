@@ -24,12 +24,29 @@ pipeline {
             steps {
                 sh 'mvn -B -ntp test'
             }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
         }
-    }
 
-    post {
-        always {
-            junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+        stage('Sonar Scan') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh 'sonar-scanner'
+                }
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Publish Artifacts') {
+            steps {
+                sh 'mvn -B -ntp package -DskipTests'
+                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+            }
         }
     }
 }
