@@ -23,7 +23,7 @@ class UserServiceTest {
     }
 
     @Test
-    void shouldFailIntentionallyForTraining() {
-        assertEquals("basic", userService.compareRole("1"));
+    void shouldReturnBasicForNonAdmin() {
+        assertEquals("basic", userService.compareRole("2"));
     }
 }
