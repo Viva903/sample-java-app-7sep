@@ -32,13 +32,11 @@ pipeline {
         }
 
         stage('Sonar Scan') {
+            environment {
+                SONAR_TOKEN = credentials('SONAR_TOKEN')
+            }
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh 'sonar-scanner'
-                }
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
+                sh 'mvn -B -ntp sonar:sonar -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN'
             }
         }
 
