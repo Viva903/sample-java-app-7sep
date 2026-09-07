@@ -2,14 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'JDK_TOOL', defaultValue: 'jdk17', description: 'Name of the JDK installation configured in Jenkins Global Tool Configuration')
-        string(name: 'MAVEN_TOOL', defaultValue: 'maven3', description: 'Name of the Maven installation configured in Jenkins Global Tool Configuration')
         string(name: 'BUILD_RETENTION', defaultValue: '10', description: 'Number of builds to retain')
-    }
-
-    tools {
-        jdk params.JDK_TOOL
-        maven params.MAVEN_TOOL
     }
 
     options {
@@ -22,6 +15,7 @@ pipeline {
     stages {
         stage('Build') {
             steps {
+                sh 'echo "JAVA_HOME=$JAVA_HOME"; java -version; mvn -version'
                 sh 'mvn -B -ntp clean compile'
             }
         }
