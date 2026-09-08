@@ -14,6 +14,7 @@ JOBS=(
   "sample-java-app-ecr:Jenkinsfile.ecr"
   "sample-java-app-deploy-app:Jenkinsfile.deploy-app"
   "sample-java-app-ecs:Jenkinsfile.ecs"
+  "sample-java-app-eks:Jenkinsfile.eks"
 )
 
 if [[ ! -f "$ENV_FILE" ]]; then

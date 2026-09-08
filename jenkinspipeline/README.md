@@ -9,6 +9,7 @@ Creates the `JJ-Pipelines` Jenkins view and pipeline jobs — one per
 | `sample-java-app-ecr`         | `Jenkinsfile.ecr`         |
 | `sample-java-app-deploy-app`  | `Jenkinsfile.deploy-app`  |
 | `sample-java-app-ecs`         | `Jenkinsfile.ecs`         |
+| `sample-java-app-eks`         | `Jenkinsfile.eks`         |
 
 Each job is a "Pipeline script from SCM" job pointing at this repo's `origin`
 remote (resolved dynamically via `git remote get-url origin` at run time) on

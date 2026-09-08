@@ -1,0 +1,164 @@
+// Build, publish, and deploy sonarqube-java-demo onto the jj-deploy-eks-development EKS cluster.
+// Jenkins job Script Path: sample-java-app/Jenkinsfile.eks
+//
+// Builds a Docker image, pushes it to ECR (us-east-2), applies the Kubernetes
+// Deployment/Service manifests in k8s/ against the EKS cluster with the new
+// image tag, waits for the rollout to finish, then verifies the app is
+// reachable over HTTP via the Service's LoadBalancer.
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'BUILD_RETENTION', defaultValue: '10', description: 'Number of builds to retain')
+    }
+
+    environment {
+        AWS_REGION      = 'us-east-2'
+        ECR_REGISTRY    = '569202655273.dkr.ecr.us-east-2.amazonaws.com'
+        ECR_REPOSITORY  = 'jj-deploy-ecr/sonarqube-java-demo'
+        IMAGE_NAME      = 'sonarqube-java-demo'
+        EKS_CLUSTER     = 'jj-deploy-eks-development'
+        K8S_APP_NAME    = 'sonarqube-java-demo'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: params.BUILD_RETENTION))
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh 'echo "JAVA_HOME=$JAVA_HOME"; java -version; mvn -version'
+                sh 'mvn -B -ntp clean compile'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'mvn -B -ntp test'
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Sonar Scan') {
+            environment {
+                SONAR_TOKEN = credentials('SONAR_TOKEN')
+            }
+            steps {
+                sh 'mvn -B -ntp sonar:sonar -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN'
+            }
+        }
+
+        stage('Package') {
+            steps {
+                sh 'mvn -B -ntp package -DskipTests'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest ."
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                    sh '''
+                        set -euo pipefail
+
+                        aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null 2>&1 || \
+                          aws ecr create-repository --repository-name "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null
+
+                        aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+                        docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker tag ${IMAGE_NAME}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                    sh '''
+                        set -euo pipefail
+
+                        if ! command -v kubectl >/dev/null 2>&1; then
+                          echo "kubectl not found on agent, installing a local copy into ./bin"
+                          mkdir -p bin
+                          KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+                          curl -fsSL -o bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+                          chmod +x bin/kubectl
+                          export PATH="$PWD/bin:$PATH"
+                        fi
+
+                        aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
+
+                        sed "s#IMAGE_PLACEHOLDER#${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}#g" k8s/deployment.yaml > deployment.rendered.yaml
+
+                        kubectl apply -f deployment.rendered.yaml
+                        kubectl apply -f k8s/service.yaml
+
+                        echo "Waiting for deployment ${K8S_APP_NAME} to roll out..."
+                        kubectl rollout status "deployment/${K8S_APP_NAME}" --timeout=180s
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                    sh '''
+                        set -euo pipefail
+
+                        export PATH="$PWD/bin:$PATH"
+
+                        LB_HOST=""
+                        for i in $(seq 1 24); do
+                          LB_HOST="$(kubectl get svc "${K8S_APP_NAME}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+                          if [ -n "${LB_HOST}" ]; then
+                            break
+                          fi
+                          echo "LoadBalancer hostname not assigned yet (attempt ${i}/24), retrying in 10s..."
+                          sleep 10
+                        done
+
+                        if [ -z "${LB_HOST}" ]; then
+                          echo "Service ${K8S_APP_NAME} never got a LoadBalancer hostname; cannot verify externally." >&2
+                          exit 1
+                        fi
+
+                        HEALTH_URL="http://${LB_HOST}/health"
+                        echo "Checking ${HEALTH_URL}"
+                        for i in $(seq 1 24); do
+                          if curl -fsS -m 5 "${HEALTH_URL}"; then
+                            echo ""
+                            echo "App is up and responding via LoadBalancer at ${LB_HOST}"
+                            exit 0
+                          fi
+                          echo "Not up yet (attempt ${i}/24), retrying in 10s..."
+                          sleep 10
+                        done
+
+                        echo "App did not respond via LoadBalancer at ${LB_HOST} after deployment" >&2
+                        exit 1
+                    '''
+                }
+            }
+        }
+    }
+}
