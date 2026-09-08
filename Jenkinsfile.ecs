@@ -20,8 +20,6 @@ pipeline {
         ECS_CLUSTER       = 'jj-deploy-ecs-development-cluster'
         ECS_SERVICE       = 'app'
         TASK_DEF_FAMILY   = 'jj-deploy-ecs-development-app'
-        VPC_ID            = 'vpc-099a4dff1ca3cc881'
-        PUBLIC_SUBNET_IDS = 'subnet-0bd358701b32ecefb,subnet-099c658846059ead2'
     }
 
     options {
@@ -157,85 +155,51 @@ PYEOF
                     sh '''
                         set -euo pipefail
 
-                        TASK_ARN="$(aws ecs list-tasks \
+                        TG_ARN="$(aws ecs describe-services \
                           --cluster "${ECS_CLUSTER}" \
-                          --service-name "${ECS_SERVICE}" \
-                          --desired-status RUNNING \
+                          --services "${ECS_SERVICE}" \
                           --region "${AWS_REGION}" \
-                          --query 'taskArns[0]' \
+                          --query 'services[0].loadBalancers[0].targetGroupArn' \
                           --output text)"
-                        if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then
-                          echo "No running task found for service ${ECS_SERVICE} on cluster ${ECS_CLUSTER}" >&2
-                          exit 1
-                        fi
-                        echo "Verifying task ${TASK_ARN}"
-
-                        TASK_JSON="$(aws ecs describe-tasks \
-                          --cluster "${ECS_CLUSTER}" \
-                          --tasks "${TASK_ARN}" \
-                          --region "${AWS_REGION}")"
-
-                        ENI_ID="$(echo "${TASK_JSON}" | python3 -c '
-import json, sys
-task = json.load(sys.stdin)["tasks"][0]
-for att in task.get("attachments", []):
-    for d in att.get("details", []):
-        if d["name"] == "networkInterfaceId":
-            print(d["value"])
-            sys.exit(0)
-')"
-                        SUBNET_ID="$(echo "${TASK_JSON}" | python3 -c '
-import json, sys
-task = json.load(sys.stdin)["tasks"][0]
-for att in task.get("attachments", []):
-    for d in att.get("details", []):
-        if d["name"] == "subnetId":
-            print(d["value"])
-            sys.exit(0)
-')"
-                        if [ -z "${ENI_ID}" ]; then
-                          echo "Could not determine network interface for task ${TASK_ARN}" >&2
+                        if [ -z "${TG_ARN}" ] || [ "${TG_ARN}" = "None" ]; then
+                          echo "Service ${ECS_SERVICE} has no load balancer attached; cannot verify externally." >&2
                           exit 1
                         fi
 
-                        case ",${PUBLIC_SUBNET_IDS}," in
-                          *",${SUBNET_ID},"*) ;;
-                          *) echo "WARNING: task subnet ${SUBNET_ID} is not one of the known public subnets (${PUBLIC_SUBNET_IDS}); it may not have a public IP." ;;
-                        esac
-
-                        PUBLIC_IP="$(aws ec2 describe-network-interfaces \
-                          --network-interface-ids "${ENI_ID}" \
+                        LB_ARN="$(aws elbv2 describe-target-groups \
+                          --target-group-arns "${TG_ARN}" \
                           --region "${AWS_REGION}" \
-                          --query 'NetworkInterfaces[0].Association.PublicIp' \
+                          --query 'TargetGroups[0].LoadBalancerArns[0]' \
                           --output text)"
-                        if [ -z "${PUBLIC_IP}" ] || [ "${PUBLIC_IP}" = "None" ]; then
-                          echo "Task ${TASK_ARN} has no public IP; cannot verify externally." >&2
-                          exit 1
+
+                        ALB_DNS="$(aws elbv2 describe-load-balancers \
+                          --load-balancer-arns "${LB_ARN}" \
+                          --region "${AWS_REGION}" \
+                          --query 'LoadBalancers[0].DNSName' \
+                          --output text)"
+
+                        HEALTH_PATH="$(aws elbv2 describe-target-groups \
+                          --target-group-arns "${TG_ARN}" \
+                          --region "${AWS_REGION}" \
+                          --query 'TargetGroups[0].HealthCheckPath' \
+                          --output text)"
+                        if [ -z "${HEALTH_PATH}" ] || [ "${HEALTH_PATH}" = "None" ]; then
+                          HEALTH_PATH="/health"
                         fi
 
-                        CONTAINER_PORT="$(python3 -c '
-import json
-with open("new-task-def.json") as f:
-    task_def = json.load(f)
-try:
-    print(task_def["containerDefinitions"][0]["portMappings"][0]["containerPort"])
-except (KeyError, IndexError):
-    print(8080)
-')"
-
-                        HEALTH_URL="http://${PUBLIC_IP}:${CONTAINER_PORT}/users/echo?q=ok"
+                        HEALTH_URL="http://${ALB_DNS}${HEALTH_PATH}"
                         echo "Checking ${HEALTH_URL}"
-                        for i in $(seq 1 12); do
+                        for i in $(seq 1 24); do
                           if curl -fsS -m 5 "${HEALTH_URL}"; then
                             echo ""
-                            echo "App is up and responding on port ${CONTAINER_PORT} at ${PUBLIC_IP}"
+                            echo "App is up and responding via ALB at ${ALB_DNS}"
                             exit 0
                           fi
-                          echo "Not up yet (attempt ${i}/12), retrying in 5s..."
-                          sleep 5
+                          echo "Not up yet (attempt ${i}/24), retrying in 10s..."
+                          sleep 10
                         done
 
-                        echo "App did not respond on port ${CONTAINER_PORT} at ${PUBLIC_IP} after deployment" >&2
+                        echo "App did not respond via ALB at ${ALB_DNS} after deployment" >&2
                         exit 1
                     '''
                 }
