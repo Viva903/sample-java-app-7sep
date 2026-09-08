@@ -1,0 +1,257 @@
+// Build, publish, and deploy sonarqube-java-demo onto the ECS Fargate "app" service.
+// Jenkins job Script Path: sample-java-app/Jenkinsfile.ecs
+//
+// Builds a Docker image, pushes it to ECR (us-east-2), registers a new task
+// definition revision pointing at that image, updates the ECS service, waits
+// for it to stabilize, then verifies the running task is reachable over HTTP.
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'BUILD_RETENTION', defaultValue: '10', description: 'Number of builds to retain')
+    }
+
+    environment {
+        AWS_REGION        = 'us-east-2'
+        ECR_REGISTRY      = '569202655273.dkr.ecr.us-east-2.amazonaws.com'
+        ECR_REPOSITORY    = 'jj-deploy-ecr/sonarqube-java-demo'
+        IMAGE_NAME        = 'sonarqube-java-demo'
+        ECS_CLUSTER       = 'jj-deploy-ecs-development-cluster'
+        ECS_SERVICE       = 'app'
+        TASK_DEF_FAMILY   = 'jj-deploy-ecs-development-app'
+        VPC_ID            = 'vpc-099a4dff1ca3cc881'
+        PUBLIC_SUBNET_IDS = 'subnet-0bd358701b32ecefb,subnet-099c658846059ead2'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: params.BUILD_RETENTION))
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh 'echo "JAVA_HOME=$JAVA_HOME"; java -version; mvn -version'
+                sh 'mvn -B -ntp clean compile'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'mvn -B -ntp test'
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Sonar Scan') {
+            environment {
+                SONAR_TOKEN = credentials('SONAR_TOKEN')
+            }
+            steps {
+                sh 'mvn -B -ntp sonar:sonar -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN'
+            }
+        }
+
+        stage('Package') {
+            steps {
+                sh 'mvn -B -ntp package -DskipTests'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest ."
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-credentials',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''
+                        set -euo pipefail
+
+                        aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null 2>&1 || \
+                          aws ecr create-repository --repository-name "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null
+
+                        aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+                        docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker tag ${IMAGE_NAME}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to ECS') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-credentials',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    script {
+                        sh '''
+                            set -euo pipefail
+
+                            aws ecs describe-task-definition \
+                              --task-definition "${TASK_DEF_FAMILY}" \
+                              --region "${AWS_REGION}" \
+                              --query 'taskDefinition' \
+                              --output json > task-def.json
+
+                            python3 - "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}" <<'PYEOF'
+import json
+import sys
+
+new_image = sys.argv[1]
+
+with open('task-def.json') as f:
+    task_def = json.load(f)
+
+for key in ('taskDefinitionArn', 'revision', 'status', 'requiresAttributes',
+            'compatibilities', 'registeredAt', 'registeredBy', 'deregisteredAt'):
+    task_def.pop(key, None)
+
+for container in task_def.get('containerDefinitions', []):
+    container['image'] = new_image
+
+with open('new-task-def.json', 'w') as f:
+    json.dump(task_def, f)
+PYEOF
+
+                            NEW_TASK_DEF_ARN="$(aws ecs register-task-definition \
+                              --cli-input-json file://new-task-def.json \
+                              --region "${AWS_REGION}" \
+                              --query 'taskDefinition.taskDefinitionArn' \
+                              --output text)"
+                            echo "Registered ${NEW_TASK_DEF_ARN}"
+
+                            aws ecs update-service \
+                              --cluster "${ECS_CLUSTER}" \
+                              --service "${ECS_SERVICE}" \
+                              --task-definition "${NEW_TASK_DEF_ARN}" \
+                              --force-new-deployment \
+                              --region "${AWS_REGION}" >/dev/null
+
+                            echo "Waiting for service ${ECS_SERVICE} on cluster ${ECS_CLUSTER} to stabilize..."
+                            aws ecs wait services-stable \
+                              --cluster "${ECS_CLUSTER}" \
+                              --services "${ECS_SERVICE}" \
+                              --region "${AWS_REGION}"
+                            echo "Service is stable."
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-credentials',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''
+                        set -euo pipefail
+
+                        TASK_ARN="$(aws ecs list-tasks \
+                          --cluster "${ECS_CLUSTER}" \
+                          --service-name "${ECS_SERVICE}" \
+                          --desired-status RUNNING \
+                          --region "${AWS_REGION}" \
+                          --query 'taskArns[0]' \
+                          --output text)"
+                        if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then
+                          echo "No running task found for service ${ECS_SERVICE} on cluster ${ECS_CLUSTER}" >&2
+                          exit 1
+                        fi
+                        echo "Verifying task ${TASK_ARN}"
+
+                        TASK_JSON="$(aws ecs describe-tasks \
+                          --cluster "${ECS_CLUSTER}" \
+                          --tasks "${TASK_ARN}" \
+                          --region "${AWS_REGION}")"
+
+                        ENI_ID="$(echo "${TASK_JSON}" | python3 -c '
+import json, sys
+task = json.load(sys.stdin)["tasks"][0]
+for att in task.get("attachments", []):
+    for d in att.get("details", []):
+        if d["name"] == "networkInterfaceId":
+            print(d["value"])
+            sys.exit(0)
+')"
+                        SUBNET_ID="$(echo "${TASK_JSON}" | python3 -c '
+import json, sys
+task = json.load(sys.stdin)["tasks"][0]
+for att in task.get("attachments", []):
+    for d in att.get("details", []):
+        if d["name"] == "subnetId":
+            print(d["value"])
+            sys.exit(0)
+')"
+                        if [ -z "${ENI_ID}" ]; then
+                          echo "Could not determine network interface for task ${TASK_ARN}" >&2
+                          exit 1
+                        fi
+
+                        case ",${PUBLIC_SUBNET_IDS}," in
+                          *",${SUBNET_ID},"*) ;;
+                          *) echo "WARNING: task subnet ${SUBNET_ID} is not one of the known public subnets (${PUBLIC_SUBNET_IDS}); it may not have a public IP." ;;
+                        esac
+
+                        PUBLIC_IP="$(aws ec2 describe-network-interfaces \
+                          --network-interface-ids "${ENI_ID}" \
+                          --region "${AWS_REGION}" \
+                          --query 'NetworkInterfaces[0].Association.PublicIp' \
+                          --output text)"
+                        if [ -z "${PUBLIC_IP}" ] || [ "${PUBLIC_IP}" = "None" ]; then
+                          echo "Task ${TASK_ARN} has no public IP; cannot verify externally." >&2
+                          exit 1
+                        fi
+
+                        CONTAINER_PORT="$(python3 -c '
+import json
+with open("new-task-def.json") as f:
+    task_def = json.load(f)
+try:
+    print(task_def["containerDefinitions"][0]["portMappings"][0]["containerPort"])
+except (KeyError, IndexError):
+    print(8080)
+')"
+
+                        HEALTH_URL="http://${PUBLIC_IP}:${CONTAINER_PORT}/users/echo?q=ok"
+                        echo "Checking ${HEALTH_URL}"
+                        for i in $(seq 1 12); do
+                          if curl -fsS -m 5 "${HEALTH_URL}"; then
+                            echo ""
+                            echo "App is up and responding on port ${CONTAINER_PORT} at ${PUBLIC_IP}"
+                            exit 0
+                          fi
+                          echo "Not up yet (attempt ${i}/12), retrying in 5s..."
+                          sleep 5
+                        done
+
+                        echo "App did not respond on port ${CONTAINER_PORT} at ${PUBLIC_IP} after deployment" >&2
+                        exit 1
+                    '''
+                }
+            }
+        }
+    }
+}
