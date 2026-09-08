@@ -36,16 +36,20 @@ jobs:
           docker run --rm -v "${PWD}:/repo" zricethezav/gitleaks:latest \
             detect --source=/repo --no-git -f json -r /repo/gitleaks-report.json -v
 
-      # 2. Dependency (SCA) scanning of the Maven dependency tree.
-      - name: OWASP Dependency-Check
+      # 2. Dependency (SCA) scanning via Trivy's filesystem scan. (Not OWASP
+      #    Dependency-Check: without an NVD API key its first run downloads
+      #    the full ~387k-record NVD feed and can take 20-60+ minutes: it
+      #    timed out the equivalent Jenkins stage in practice. Trivy ships
+      #    its own prebuilt vulnerability DB, so this needs no API key.)
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
-        env:
-          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: |
-          mvn -B -ntp org.owasp:dependency-check-maven:10.0.4:check \
-            -Dformat=JSON \
-            -DoutputDirectory=dependency-check-report \
-            $( [ -n "$NVD_API_KEY" ] && echo -DnvdApiKey="$NVD_API_KEY" )
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-fs-report.json
+          severity: CRITICAL,HIGH,MEDIUM
 
       # 3. Container image scanning of the image the pipeline actually ships
       #    (same Dockerfile used by Jenkinsfile.ecr/.ecs/.eks).
@@ -68,7 +72,7 @@ jobs:
           name: security-scan-reports
           path: |
             gitleaks-report.json
-            dependency-check-report/*.json
+            trivy-fs-report.json
             trivy-report.json
           if-no-files-found: ignore
           retention-days: 14
@@ -83,8 +87,8 @@ jobs:
             Three security scanners just ran against this PR's code and its
             container image:
               - Gitleaks (secrets): ./gitleaks-report.json (may be absent if no findings)
-              - OWASP Dependency-Check (vulnerable dependencies): ./dependency-check-report/*.json
-              - Trivy (container image CVEs): ./trivy-report.json
+              - Trivy filesystem scan (vulnerable dependencies): ./trivy-fs-report.json
+              - Trivy image scan (container image CVEs): ./trivy-report.json
 
             Read whichever of these files exist. For each finding, judge real
             risk, not just raw severity: is the affected code/dependency/package

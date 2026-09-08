@@ -34,16 +34,17 @@ DIFF_CONTENT="$(git diff "${DIFF_RANGE}" -- '*.java' 2>/dev/null || echo '(no di
 [ -n "${DIFF_CONTENT}" ] || DIFF_CONTENT="(no *.java changes in ${DIFF_RANGE})"
 JACOCO_CONTENT="$(read_or_placeholder "${JACOCO_XML}")"
 GITLEAKS_CONTENT="$(read_or_placeholder "${SECURITY_REPORTS_DIR}/gitleaks-report.json")"
-DEPCHECK_CONTENT="$(read_or_placeholder "${SECURITY_REPORTS_DIR}/dependency-check-report.json")"
+TRIVY_FS_CONTENT="$(read_or_placeholder "${SECURITY_REPORTS_DIR}/trivy-fs-report.json")"
 TRIVY_CONTENT="$(read_or_placeholder "${SECURITY_REPORTS_DIR}/trivy-report.json")"
 
 PROMPT="$(cat <<PROMPT_EOF
 You are reviewing Jenkins build ${BUILD_NUMBER:-unknown} of ${JOB_NAME:-sample-java-app} (git diff range ${DIFF_RANGE}).
 
 Below are: the Java diff for this build, a JaCoCo coverage report, and three
-raw security scanner reports (Gitleaks secrets, OWASP Dependency-Check,
-Trivy container image scan - any of these may say "(not present)" if that
-scanner found nothing, didn't run, or this pipeline has no image-scan stage).
+raw security scanner reports (Gitleaks secrets, Trivy filesystem/dependency
+scan, Trivy container image scan - any of these may say "(not present)" if
+that scanner found nothing, didn't run, or this pipeline has no image-scan
+stage).
 
 Do three things and write the result as Markdown:
 
@@ -68,8 +69,8 @@ ${JACOCO_CONTENT}
 --- GITLEAKS REPORT ---
 ${GITLEAKS_CONTENT}
 
---- OWASP DEPENDENCY-CHECK REPORT ---
-${DEPCHECK_CONTENT}
+--- TRIVY FILESYSTEM/DEPENDENCY SCAN REPORT ---
+${TRIVY_FS_CONTENT}
 
 --- TRIVY IMAGE SCAN REPORT ---
 ${TRIVY_CONTENT}

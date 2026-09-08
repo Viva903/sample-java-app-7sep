@@ -16,19 +16,32 @@ triage stages.
 | File | Does |
 |---|---|
 | `.github/workflows/ai-pr-review.yml` | Claude reviews the PR diff for bugs, security issues, and maintainability, and posts one PR comment. |
-| `.github/workflows/ai-security-scan.yml` | Runs Gitleaks (secrets), OWASP Dependency-Check (vulnerable dependencies), and Trivy (container image built from the repo `Dockerfile`), then has Claude triage the three raw reports into one prioritized "must fix / worth tracking / noise" PR comment. Raw JSON reports are uploaded as a workflow artifact. |
+| `.github/workflows/ai-security-scan.yml` | Runs Gitleaks (secrets), Trivy filesystem scan (vulnerable dependencies), and Trivy image scan (container image built from the repo `Dockerfile`), then has Claude triage the three raw reports into one prioritized "must fix / worth tracking / noise" PR comment. Raw JSON reports are uploaded as a workflow artifact. |
 | `.github/workflows/ai-test-gap-analysis.yml` | Runs `mvn test` (now with JaCoCo instrumentation), then has Claude cross-reference the coverage report against the PR diff to list untested changed methods, ranked by risk, with draft JUnit 5 tests suggested (not committed) for the riskiest ones. |
 
 ## What was added — Jenkins (build time)
 
 | File | Does |
 |---|---|
-| `ci/security-scan.sh` | Runs Gitleaks (secrets) and OWASP Dependency-Check (dependencies) against the source tree, writing JSON reports to `security-reports/`. Invoked from the new **Security Scan** stage, right after **Sonar Scan** (or after **Test** in `Jenkinsfile.deploy-app`, which has no Sonar stage), in all five `Jenkinsfile*`. |
+| `ci/security-scan.sh` | Runs Gitleaks (secrets) and a `trivy fs` scan (dependencies) against the source tree, writing JSON reports to `security-reports/`. Uses Trivy rather than OWASP Dependency-Check specifically because Dependency-Check needs an NVD API key to run in reasonable time (see incident note below). Invoked from the new **Security Scan** stage, right after **Sonar Scan** (or after **Test** in `Jenkinsfile.deploy-app`, which has no Sonar stage), in all five `Jenkinsfile*`. |
 | `ci/image-scan.sh` | Runs Trivy against the just-built Docker image (`IMAGE_REF=${IMAGE_NAME}:${BUILD_NUMBER}`), writing `security-reports/trivy-report.json`. Invoked from the new **Container Image Scan** stage, right after **Build Docker Image**, in `Jenkinsfile.ecr` / `.ecs` / `.eks` (before the image is pushed to ECR). |
 | `ci/ai-triage.sh` | Calls the Claude API directly (raw HTTPS via `curl`, model `claude-opus-5`) with: the `*.java` diff since the previous commit, the JaCoCo coverage XML, and whichever of the three scanner reports exist. Writes one `ai-review-report.md` with test-gap analysis, security triage, and a PASS / PASS WITH FINDINGS / BLOCKER verdict line. Invoked from the new **AI Review** stage in all five `Jenkinsfile*`, using a Jenkins `ANTHROPIC_API_KEY` credential the same way `Sonar Scan` already uses `SONAR_TOKEN`. |
 | `Jenkinsfile`, `Jenkinsfile.ecr`, `Jenkinsfile.ecs`, `Jenkinsfile.eks`, `Jenkinsfile.deploy-app` | Each gained a **Security Scan** stage and an **AI Review** stage; `.ecr`/`.ecs`/`.eks` also gained a **Container Image Scan** stage between **Build Docker Image** and **Push to ECR**. All new stages `archiveArtifacts` their reports (`security-reports/*.json`, `ai-review-report.md`) so they're visible from the Jenkins build page. |
 | `pom.xml` | Added `jacoco-maven-plugin` (0.8.12), bound to `test`, so `target/site/jacoco/jacoco.xml` and `index.html` are produced on every `mvn test` — the coverage baseline both the Jenkins AI Review stage and the GitHub test-gap workflow read. This also benefits the existing Jenkins `Sonar Scan` stage. |
 | `sonar-project.properties` | Added `sonar.coverage.jacoco.xmlReportPaths` so SonarQube also picks up the new JaCoCo coverage data. |
+
+### Incident: why there's no OWASP Dependency-Check
+
+The first live run of `sample-java-app-build` (build #3) was manually
+aborted after ~2.5 minutes stuck on `mvn org.owasp:dependency-check-maven:check`:
+without an `NVD_API_KEY`, its first run downloads the full NVD vulnerability
+feed (387,285 records at the time) and had only reached 3% when it was
+killed — comfortably capable of exceeding the pipeline's 30-minute
+`timeout()` on every single build. Rather than requiring every environment
+this runs in to provision an NVD API key, dependency/SCA scanning uses
+`trivy fs` instead (see `ci/security-scan.sh` / `ai-security-scan.yml`),
+which ships its own prebuilt vulnerability DB and needs no API key. The only
+credential this whole AI review layer requires is `ANTHROPIC_API_KEY`.
 
 ### Why two layers instead of one
 
@@ -46,10 +59,8 @@ the GitHub Actions layer.
 - **Jenkins**: add an `ANTHROPIC_API_KEY` credential (Secret text) in Jenkins
   — same place `SONAR_TOKEN` and `aws-credentials` already live — so the new
   `AI Review` stage's `credentials('ANTHROPIC_API_KEY')` binding resolves.
-- Optional: add an `NVD_API_KEY` (GitHub secret, or export it before
-  `mvn ... dependency-check-maven` runs on the Jenkins agent) to speed
-  up/raise rate limits on OWASP Dependency-Check — it runs without one, just
-  slower.
+  This is the only credential the whole AI review layer needs — no NVD key,
+  no other secrets.
 - Docker must be available wherever these run — preinstalled on GitHub's
   `ubuntu-latest` runners by default; on Jenkins agents it's already a
   requirement today (the existing `Build Docker Image` / `docker push`
