@@ -1,0 +1,46 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code Review
+        uses: anthropics/claude-code-action@main
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review only the lines changed in this pull request (diff against
+            origin/${{ github.base_ref }}). This is a Java 21 / Spring Boot project.
+
+            Check for:
+            1. Correctness bugs (null-pointer risk, off-by-one, unclosed resources,
+               resource leaks, incorrect exception handling).
+            2. Security issues (hardcoded secrets/credentials, weak crypto such as
+               MD5/SHA1 or java.util.Random used for tokens/passwords, unsanitized
+               input reflected into responses, SQL/command injection, unsafe
+               deserialization).
+            3. Maintainability (deep nesting, duplicated logic, unclear naming,
+               missing null checks on public API inputs).
+            4. Consistency with the rest of the codebase's existing style.
+
+            Do not comment on pre-existing issues outside the diff. Post your
+            findings as a single PR review comment, grouped by severity
+            (blocker / warning / suggestion), each with the file/line and a short
+            concrete fix. If the diff has no issues, post a short comment saying so.
