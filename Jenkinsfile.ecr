@@ -47,6 +47,17 @@ pipeline {
             }
         }
 
+        stage('Security Scan') {
+            steps {
+                sh './ci/security-scan.sh'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'security-reports/*.json', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+
         stage('Package') {
             steps {
                 sh 'mvn -B -ntp package -DskipTests'
@@ -56,6 +67,34 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest ."
+            }
+        }
+
+        stage('Container Image Scan') {
+            environment {
+                IMAGE_REF = "${IMAGE_NAME}:${BUILD_NUMBER}"
+            }
+            steps {
+                sh './ci/image-scan.sh'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'security-reports/trivy-report.json', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+
+        stage('AI Review') {
+            environment {
+                ANTHROPIC_API_KEY = credentials('ANTHROPIC_API_KEY')
+            }
+            steps {
+                sh './ci/ai-triage.sh'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'ai-review-report.md', allowEmptyArchive: true
+                }
             }
         }
 
