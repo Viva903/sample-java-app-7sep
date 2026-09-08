@@ -1,6 +1,6 @@
 # Jenkins Pipeline Automation
 
-Creates the `JJ-Pipelines` Jenkins view and three pipeline jobs — one per
+Creates the `JJ-Pipelines` Jenkins view and pipeline jobs — one per
 `Jenkinsfile*` in this repo — via the Jenkins REST API.
 
 | Job name                     | Script path              |
@@ -8,6 +8,7 @@ Creates the `JJ-Pipelines` Jenkins view and three pipeline jobs — one per
 | `sample-java-app-build`       | `Jenkinsfile`             |
 | `sample-java-app-ecr`         | `Jenkinsfile.ecr`         |
 | `sample-java-app-deploy-app`  | `Jenkinsfile.deploy-app`  |
+| `sample-java-app-ecs`         | `Jenkinsfile.ecs`         |
 
 Each job is a "Pipeline script from SCM" job pointing at this repo's `origin`
 remote (resolved dynamically via `git remote get-url origin` at run time) on
@@ -42,5 +43,5 @@ failing.
 
 - The script prints the view URL and each job's URL on success.
 - `curl -s -u "$JENKINS_USER:$JENKINS_API_TOKEN" "$JENKINS_URL/view/JJ-Pipelines/api/json"`
-  should list all three jobs.
+  should list all four jobs.
 - Visit `$JENKINS_URL/view/JJ-Pipelines/` in a browser.

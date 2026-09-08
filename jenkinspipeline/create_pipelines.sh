@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the JJ-Pipelines Jenkins view and its three pipeline jobs via the Jenkins REST API.
+# Creates the JJ-Pipelines Jenkins view and its pipeline jobs via the Jenkins REST API.
 # See README.md for setup and usage.
 set -euo pipefail
 
@@ -13,6 +13,7 @@ JOBS=(
   "sample-java-app-build:Jenkinsfile"
   "sample-java-app-ecr:Jenkinsfile.ecr"
   "sample-java-app-deploy-app:Jenkinsfile.deploy-app"
+  "sample-java-app-ecs:Jenkinsfile.ecs"
 )
 
 if [[ ! -f "$ENV_FILE" ]]; then
