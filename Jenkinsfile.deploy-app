@@ -19,7 +19,7 @@ pipeline {
 
     environment {
         JAR_NAME = 'sonarqube-java-demo-0.0.1-SNAPSHOT.jar'
-        S3_BUCKET = 'jj-s3-development-569202655273'
+        S3_BUCKET = 'jj-vm-development-ci-artifacts-569202655273'
         APP_INSTANCE_ID = 'i-0d3daf832e40fac5f'
     }
 
